@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "module": "preserve",
+    "target": "ES2025",
+    "lib": [
+      "ES2020",
+      "ES2025.Regexp"
+    ],
+    "rootDir": "src",
+    "strict": true,
+    "noEmit": true
+  }
+}
