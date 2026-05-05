@@ -110,11 +110,12 @@
 
   "scripts": {
     "vscode:prepublish": "pnpm run prepackage",
-    "compile": "pnpm run check-types && pnpm run lint && node esbuild.mjs",
+    "check": "npm-run-all -p check-types lint",
+    "compile": "pnpm run check && node esbuild.mjs",
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.mjs --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-    "prepackage": "pnpm run check-types && pnpm run lint && node esbuild.mjs --production",
+    "prepackage": "pnpm run check && node esbuild.mjs --production",
     "package": "vsce package",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
