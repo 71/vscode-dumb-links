@@ -5,10 +5,10 @@ search.
 
 > [!NOTE]
 >
-> WIP: the basic logic works, but there is no test, and the name / documentation
-> will likely change. It is also both too permissive (it will resolve anything
-> that looks like a link) and too strict (it will yield errors if a symbol
-> cannot be resolved).
+> WIP: the basic logic works, but there is no test, and the documentation will
+> likely change. It is also both too permissive (it will resolve anything that
+> looks like a link) and too strict (it will yield errors if a symbol cannot be
+> resolved).
 
 ## Examples
 
@@ -30,13 +30,23 @@ These can be clicked with the extension loaded.
 
 ### Supported paths
 
-- `relative/path` (requires at least one `/`)
+- `src/extension.ts` (requires at least one `/`)
 
-- `./relative-path`
+  - Can be disabled by setting
+    [`dumbLinks.overrides.implicit.enable`](vscode://settings/dumbLinks.overrides)
+    to `false`.
 
-- `../relative-path`
+- `./README.md`
 
-- `//path/relative/to/workspace/folder` (uses the _first_ workspace folder)
+  - Can be disabled by setting
+    [`dumbLinks.overrides.relative.enable`](vscode://settings/dumbLinks.overrides)
+    to `false`.
+
+- `//README.md` (uses the _first_ workspace folder)
+
+  - Can be disabled by setting
+    [`dumbLinks.overrides.absolute.enable`](vscode://settings/dumbLinks.overrides)
+    to `false`.
 
 ### Supported suffixes
 
@@ -50,5 +60,5 @@ These can be clicked with the extension loaded.
 
 ```sh
 $ pnpm install
-$ pnpm run package
+$ pnpm run package-vsix
 ```
