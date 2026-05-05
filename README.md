@@ -18,13 +18,13 @@ These can be clicked with the extension loaded.
 
 - `src/extension.ts#activate`
 
-- `/src/extension.ts#LinkResolver.scanLines`
+- `//src/extension.ts#LinkResolver.scanLines`
 
-- `/src/extension.ts:5`
+- `//src/extension.ts:5`
 
-- `/src/extension.ts:9:10`
+- `//src/extension.ts:9:10`
 
-- `/README.md#:~:text=resolves%20relative%20links`
+- `//README.md#:~:text=resolves%20relative%20links`
 
 ## Syntax
 
@@ -36,7 +36,7 @@ These can be clicked with the extension loaded.
 
 - `../relative-path`
 
-- `/path/relative/to/workspace/folder` (uses the _first_ workspace folder)
+- `//path/relative/to/workspace/folder` (uses the _first_ workspace folder)
 
 ### Supported suffixes
 

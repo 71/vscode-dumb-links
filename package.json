@@ -4,9 +4,9 @@
   "publisher": "gregoire",
   "repository": {
     "type": "git",
-    "url": "https://github.com/71/vscode-provide-links"
+    "url": "https://github.com/71/vscode-dumb-links"
   },
-  "version": "0.0.1",
+  "version": "0.1.0",
   "license": "MPL-2.0",
   "categories": [
     "Linters",
@@ -25,8 +25,88 @@
     "ui",
     "workspace"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "This extension can be enabled and configured in untrusted workspaces."
+    }
+  },
   "main": "./dist/extension.js",
   "browser": "./dist/extension.js",
+
+  "contributes": {
+    "configuration": {
+      "title": "Dumb Links",
+      "properties": {
+        "dumbLinks.enable": {
+          "markdownDescription": "If false, all rules are ignored. This takes precendence over `#dumbLinks.overrides#`.",
+          "type": "boolean",
+          "default": true,
+          "order": 0,
+          "scope": "language-overridable"
+        },
+        "dumbLinks.overrides": {
+          "additionalProperties": {
+            "^[@~]?\\w+$": {
+              "markdownDescription": "Override the behavior of built-in rules.",
+              "properties": {
+                "enable": {
+                  "description": "If false, ignore this rule.",
+                  "type": "boolean",
+                  "default": true
+                },
+                "ifCannotReadFile": {
+                  "description": "Behavior if the target file cannot be opened.",
+                  "enum": ["ignore", "warn", "error"],
+                  "enumDescriptions": [
+                    "Ignore silently.",
+                    "Display a warning.",
+                    "Display an error."
+                  ],
+                  "default": "error"
+                },
+                "ifCannotFindTarget": {
+                  "markdownDescription": "Behavior if the target symbol or text snippet cannot be found.",
+                  "enum": [
+                    "ignore",
+                    "warn",
+                    "error",
+                    "link",
+                    "warn-link",
+                    "error-link"
+                  ],
+                  "enumDescriptions": [
+                    "Ignore silently without linking.",
+                    "Display a warning without linking.",
+                    "Display an error without linking.",
+                    "Link to the file.",
+                    "Display a warning and link to the file.",
+                    "Display an error and link to the file."
+                  ],
+                  "default": "warn-link"
+                }
+              }
+            }
+          },
+          "propertyNames": {
+            "enum": ["absolute", "relative", "implicit"],
+            "markdownEnumDescriptions": [
+              "Absolute links starting with `//`.",
+              "Relative links starting with `./` or `../`.",
+              "Implicit links made up of several words separated by `/`."
+            ]
+          },
+          "default": {
+            "implicit": {
+              "ifCannotReadFile": "ignore"
+            }
+          },
+          "order": 1,
+          "scope": "language-overridable"
+        }
+      }
+    }
+  },
 
   "scripts": {
     "vscode:prepublish": "pnpm run prepackage",

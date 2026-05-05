@@ -1,14 +1,47 @@
 import * as vscode from "vscode";
+import {
+  configurationPrefix,
+  enabledGlobally,
+  Rule,
+  rulesForDocument,
+} from "./configuration";
 
 /**
  * ID of the command used to open a document via {@linkcode vscode.window.showTextDocument()}
  * when its URI does not support specific ranges.
  */
-let openCommand: string;
+const openCommand = `${configurationPrefix}.openAtRange`;
 
-export function activate(context: vscode.ExtensionContext) {
-  openCommand = `${context.extension.id}.openAtRange`;
+export function activate(context: vscode.ExtensionContext): void {
+  const toggle = () => {
+    // We always have one subscription to listen to the configuration, and more if we are enabled.
+    const isEnabled = context.subscriptions.length > 1;
 
+    if (enabledGlobally()) {
+      if (!isEnabled) enable(context);
+    } else if (isEnabled) {
+      disable();
+
+      for (const subscription of context.subscriptions.splice(1)) {
+        subscription.dispose();
+      }
+    }
+  };
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration(configurationPrefix)) toggle();
+    }),
+  );
+
+  toggle();
+}
+
+export function deactivate(): void {
+  disable();
+}
+
+function enable(context: vscode.ExtensionContext): void {
   const diagnosticsCollection = vscode.languages.createDiagnosticCollection(
     context.extension.id,
   );
@@ -19,8 +52,18 @@ export function activate(context: vscode.ExtensionContext) {
         document: vscode.TextDocument,
         token: vscode.CancellationToken,
       ): Promise<vscode.DocumentLink[] | undefined> {
+        const rules = rulesForDocument(document.uri);
+        if (rules.length === 0) return;
+
+        const rulesByName = Object.fromEntries(
+          rules.map((rule) => [rule.name, rule]),
+        );
         const documentUriString = document.uri.toString();
-        const resolver = new LinkResolver(documentUriString, token);
+        const resolver = new LinkResolver(
+          documentUriString,
+          rulesByName,
+          token,
+        );
 
         resolver.scanLines(document);
 
@@ -87,7 +130,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 }
 
-export function deactivate() {
+function disable(): void {
   documentCache.clear();
   referencedDocumentCache.clear();
 }
@@ -104,7 +147,7 @@ const linkRegExp = (() => {
   // Make sure not to accept separators (e.g. `#`, `:`), glob characters (e.g. `?`, `*`).
   const pathSegment = /[\w.-]+/;
   const path = new RegExp(
-    `(?<path>(?:${pathSegment.source})?(?:/${pathSegment.source})+)`,
+    `(?<path>(?:${pathSegment.source}|/)(?:/${pathSegment.source})+)`,
   );
 
   // Matches `line` or `line:column`.
@@ -118,7 +161,7 @@ const linkRegExp = (() => {
   const textFragment = /:~:text=(?<fragment>\S+)/;
 
   return new RegExp(
-    `${prefix.source}${path.source}(?::${lineColumn.source}|#(?:${textFragment.source}|${symbolPath.source})?)?`,
+    `${prefix.source}${path.source}(?::${lineColumn.source}|#(?:${textFragment.source}|${symbolPath.source})?)?(?!/)\\b`,
     "gu",
   );
 })();
@@ -132,6 +175,7 @@ class LinkResolver {
 
   public constructor(
     private readonly uriString: string,
+    private readonly rules: { readonly [_ in Rule.Name]?: Rule },
     private readonly token: vscode.CancellationToken,
   ) {
     this.cachedDocument = getOrCreate(
@@ -164,6 +208,14 @@ class LinkResolver {
     for (const match of line.text.matchAll(linkRegExp)) {
       const matchText = trimSuffix(match[0]);
 
+      const ruleName: Rule.Name = matchText.startsWith("/")
+        ? "absolute"
+        : matchText.startsWith("./") || matchText.startsWith("../")
+        ? "relative"
+        : "implicit";
+      const rule = this.rules[ruleName];
+      if (rule === undefined) continue;
+
       if (
         !matchText.startsWith(".") && !matchText.startsWith("/") &&
         !matchText.slice(matchText.lastIndexOf("/") + 1).includes(".")
@@ -181,9 +233,10 @@ class LinkResolver {
       );
 
       if (matchCache !== undefined) {
-        if (matchCache.target instanceof vscode.Diagnostic) {
-          this.diagnostics.push(matchCache.target);
-        } else {
+        if (matchCache.diagnostic !== undefined) {
+          this.diagnostics.push(matchCache.diagnostic);
+        }
+        if (matchCache.target !== undefined) {
           this.links.push(new vscode.DocumentLink(range, matchCache.target));
         }
         matchCache.keep = true;
@@ -194,7 +247,7 @@ class LinkResolver {
       const { path, line, column, symbol, fragment } = match.groups!;
       let targetUri: vscode.Uri;
 
-      if (path.startsWith("/")) {
+      if (path.startsWith("//")) {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 
         if (workspaceFolder === undefined) {
@@ -202,29 +255,24 @@ class LinkResolver {
             new vscode.Diagnostic(
               range,
               `Cannot use absolute link \`${path}\` outside of a workspace.`,
-              vscode.DiagnosticSeverity.Error,
+              rule.fileNotFound,
             ),
           );
           continue;
         }
 
-        targetUri = vscode.Uri.joinPath(workspaceFolder.uri, path.slice(1));
+        targetUri = vscode.Uri.joinPath(workspaceFolder.uri, path.slice(2));
       } else {
         targetUri = vscode.Uri.joinPath(document.uri, "..", path);
       }
       const targetString = targetUri.toString();
 
+      let target: Reference.Target;
+
       if (line !== undefined) {
         // Handle `:<line>` syntax.
-        this.links.push(
-          new vscode.DocumentLink(range, at(targetUri, +line, +(column ?? 1))),
-        );
-        continue;
-      }
-
-      let target: string | TextFragment;
-
-      if (symbol !== undefined) {
+        target = new vscode.Position(+line - 1, +(column ?? 1) - 1);
+      } else if (symbol !== undefined) {
         // Handle `#<symbol>` syntax.
         target = trimSuffix(symbol);
       } else if (fragment !== undefined) {
@@ -233,16 +281,27 @@ class LinkResolver {
 
         if (typeof parsed === "string") {
           const diagnosticEnd = match.index + matchText.length;
-          const diagnosticStart = diagnosticEnd - fragment.length + 1; // Skip "#".
+          const diagnosticStart = diagnosticEnd - fragment.length;
 
-          this.diagnostics.push(
-            new vscode.Diagnostic(
-              new vscode.Range(
-                new vscode.Position(lineNumber, diagnosticStart),
-                new vscode.Position(lineNumber, diagnosticEnd),
-              ),
-              parsed,
-              vscode.DiagnosticSeverity.Warning,
+          const brokenReference: Reference = {
+            range,
+            target: undefined,
+            text: matchText,
+            rule,
+          };
+
+          this.diagnoseTargetNotFound(
+            targetUri,
+            parsed,
+            brokenReference,
+            getOrCreate(
+              referencedDocumentCache,
+              targetString,
+              () => new Map(),
+            ),
+            new vscode.Range(
+              new vscode.Position(lineNumber, diagnosticStart),
+              new vscode.Position(lineNumber, diagnosticEnd),
             ),
           );
 
@@ -251,15 +310,14 @@ class LinkResolver {
 
         target = parsed;
       } else {
-        // Plain link.
-        this.links.push(new vscode.DocumentLink(range, targetUri));
-        continue;
+        // Plain link -- we only care about whether or not the file exists.
+        target = undefined;
       }
 
       getOrCreate(this.referencedDocuments, targetString, () => ({
         uri: targetUri,
         references: [],
-      })).references.push({ range, target, text: matchText });
+      })).references.push({ range, target, text: matchText, rule });
     }
   }
 
@@ -296,11 +354,21 @@ class LinkResolver {
 
     // Build a tree of all references to match against the symbol hierarchy.
     const symbolTree = new Map<string, SymbolTree>();
-    const withTextFragments: Reference[] = [];
+    const withPositions: Reference<vscode.Position | undefined>[] = [];
+    const withTextFragments: Reference<TextFragment>[] = [];
 
     for (const reference of references) {
-      if (typeof reference.target === "object") {
-        withTextFragments.push(reference);
+      if (typeof reference.target !== "string") {
+        if (
+          reference.target === undefined ||
+          reference.target instanceof vscode.Position
+        ) {
+          withPositions.push(
+            reference as Reference<vscode.Position | undefined>,
+          );
+        } else {
+          withTextFragments.push(reference as Reference<TextFragment>);
+        }
         continue;
       }
 
@@ -321,7 +389,7 @@ class LinkResolver {
         node,
         parts[parts.length - 1],
         () => ({ references: [], children: new Map() }),
-      ).references.push(reference);
+      ).references.push(reference as Reference<string>);
     }
 
     const promises: Promise<void>[] = [];
@@ -331,8 +399,15 @@ class LinkResolver {
     }
     if (withTextFragments.length > 0) {
       promises.push(
-        this.resolveTextFragments(uri, withTextFragments, referenceCache),
+        this.resolveTextFragments(
+          uri,
+          withTextFragments,
+          withPositions,
+          referenceCache,
+        ),
       );
+    } else if (withPositions.length > 0) {
+      promises.push(this.resolvePositions(uri, withPositions, referenceCache));
     }
 
     await Promise.all(promises);
@@ -343,37 +418,29 @@ class LinkResolver {
 
   private async resolveTextFragments(
     uri: vscode.Uri,
-    references: readonly Reference[],
+    references: readonly Reference<TextFragment>[],
+    positions: readonly Reference<vscode.Position | undefined>[],
     referenceCache: Map<string, Set<string>>,
   ): Promise<void> {
     // Read file, prioritizing the one currently loaded by VS Code.
-    const document = vscode.workspace.textDocuments.find((document) =>
-      uriEq(document.uri, uri)
-    );
-    let documentText = document?.getText();
+    const document = documentAt(uri);
+    const documentText = document?.getText() ?? await readFileText(uri);
 
-    if (documentText === undefined) {
-      try {
-        const documentBytes = await vscode.workspace.fs.readFile(uri);
-
-        documentText = await vscode.workspace.decode(documentBytes, { uri });
-      } catch (e) {
-        const message = `Cannot read \`${uri.toString(true)}\`: ${
-          (e as Error).message
-        }.`;
-
-        for (const reference of references) {
-          this.diagnostics.push(
-            new vscode.Diagnostic(
-              reference.range,
-              message,
-              vscode.DiagnosticSeverity.Error,
-            ),
-          );
-        }
-
-        return;
+    if (documentText instanceof Error) {
+      this.diagnoseFileNotFound(uri, documentText, references);
+      if (positions.length > 0) {
+        this.diagnoseFileNotFound(uri, documentText, positions);
       }
+      return;
+    }
+
+    if (positions.length > 0) {
+      this.resolvePositionsIn(
+        uri,
+        document ?? documentText,
+        positions,
+        referenceCache,
+      );
     }
 
     // Compile text fragments into one `RegExp`. In theory we could just use `indexOf()` with each
@@ -382,7 +449,7 @@ class LinkResolver {
     // `RegExp` with `i` flag. But we can do even better: we can put all the fragments into a single
     // `RegExp` and search all of them at once.
     const remainingFragments = references.map((reference) => {
-      const fragment = reference.target as TextFragment;
+      const fragment = reference.target;
       const re = fragment.textEnd === ""
         ? RegExp.escape(fragment.textStart)
         : `${RegExp.escape(fragment.textStart)}[\\s\\S]+?${
@@ -407,15 +474,13 @@ class LinkResolver {
       if (match === null) {
         // No more fragments match.
         for (const { reference } of remainingFragments) {
-          this.diagnostics.push(
-            new vscode.Diagnostic(
-              reference.range,
-              `Cannot find \`${reference.text}\` in \`${uri.toString(true)}\`.`,
-              vscode.DiagnosticSeverity.Warning,
-            ),
+          this.diagnoseTargetNotFound(
+            uri,
+            `Cannot find \`${reference.text}\` in \`${uri.toString(true)}\`.`,
+            reference,
+            referenceCache,
           );
         }
-
         return;
       }
 
@@ -478,7 +543,7 @@ class LinkResolver {
     }
 
     // Every remaining reference in the tree is unresolved; diagnose them.
-    this.diagnoseMissing(symbolTree);
+    this.diagnoseMissing(uri, symbolTree, referenceCache);
   }
 
   private resolveSymbolsRecursively(
@@ -540,25 +605,171 @@ class LinkResolver {
     }
   }
 
-  private diagnoseMissing(tree: ReadonlyMap<string, SymbolTree>): void {
+  private diagnoseMissing(
+    uri: vscode.Uri,
+    tree: ReadonlyMap<string, SymbolTree>,
+    referenceCache: Map<string, Set<string>>,
+  ): void {
     for (const [_, node] of tree) {
       for (const reference of node.references) {
-        const diagnostic = new vscode.Diagnostic(
-          reference.range,
+        this.diagnoseTargetNotFound(
+          uri,
           `Unresolved reference: \`${reference.target}\`.`,
+          reference,
+          referenceCache,
         );
-
-        this.diagnostics.push(diagnostic);
-        this.cachedDocument.references.set(reference.text, {
-          target: diagnostic,
-          keep: true,
-        });
       }
 
-      this.diagnoseMissing(node.children);
+      this.diagnoseMissing(uri, node.children, referenceCache);
     }
   }
 
+  // -----------------------------------------------------------------------------------------------
+  // MARK: Position checking
+
+  private async resolvePositions(
+    uri: vscode.Uri,
+    references: readonly Reference<vscode.Position | undefined>[],
+    referenceCache: Map<string, Set<string>>,
+  ): Promise<void> {
+    const document = documentAt(uri);
+
+    if (document !== undefined) {
+      this.resolvePositionsIn(
+        uri,
+        document,
+        references,
+        referenceCache,
+      );
+      return;
+    }
+
+    if (
+      references.every((r) =>
+        r.target === undefined || r.target.line + r.target.character === 0
+      )
+    ) {
+      // We only care about whether the file exists, so we don't need to read it.
+      try {
+        const stat = await vscode.workspace.fs.stat(uri);
+
+        if (
+          stat.type !== vscode.FileType.File &&
+          stat.type !== vscode.FileType.SymbolicLink
+        ) {
+          throw new Error(`not a file`);
+        }
+
+        for (const reference of references) {
+          if (reference.target === undefined) {
+            this.addLink(reference, uri, -1, -1, referenceCache);
+          } else {
+            this.addLink(reference, uri, 0, 0, referenceCache);
+          }
+        }
+      } catch (e) {
+        this.diagnoseFileNotFound(uri, e as Error, references);
+      }
+      return;
+    }
+
+    const documentText = await readFileText(uri);
+
+    if (documentText instanceof Error) {
+      this.diagnoseFileNotFound(uri, documentText, references);
+    } else {
+      this.resolvePositionsIn(uri, documentText, references, referenceCache);
+    }
+  }
+
+  private resolvePositionsIn(
+    uri: vscode.Uri,
+    document: vscode.TextDocument | string,
+    references: readonly Reference<vscode.Position | undefined>[],
+    referenceCache: Map<string, Set<string>>,
+  ): void {
+    // Sort references to access lines from the top of the document.
+    const sortedReferences = references.filter(
+      (r): r is Reference<vscode.Position> => {
+        if (
+          r.target === undefined || r.target.line + r.target.character === 0
+        ) {
+          // File exists, no need to check it.
+          if (r.target === undefined) {
+            this.addLink(r, uri, -1, -1, referenceCache);
+          } else {
+            this.addLink(r, uri, 0, 0, referenceCache);
+          }
+
+          return false;
+        }
+        return true;
+      },
+    ).sort((a, b) => a.target.compareTo(b.target));
+
+    if (sortedReferences.length === 0) return;
+
+    // Set up logic to advance lines.
+    let lineLengthOf: (line: number) => number;
+
+    if (typeof document === "string") {
+      const lines = document.split("\n");
+
+      lineLengthOf = (line) => line < lines.length ? lines[line].length : -1;
+    } else {
+      let lastLine = 0;
+      let lastLineLength = document.lineCount === 0
+        ? 0
+        : document.lineAt(0).range.end.character;
+
+      lineLengthOf = (line) => {
+        if (line >= document.lineCount) return -1;
+        if (line < lastLine) {
+          lastLine = line;
+          lastLineLength = document.lineAt(line).range.end.character;
+        }
+        return lastLineLength;
+      };
+    }
+
+    let currentReference = 0;
+
+    while (currentReference < sortedReferences.length) {
+      const reference = sortedReferences[currentReference];
+      const { line, character } = reference.target;
+      const lineLength = lineLengthOf(line);
+
+      // Check that we're in range. `lineLength` is -1 if the line is out of range, in which case
+      // the check below will fail.
+      if (character >= lineLength) break;
+
+      this.addLink(reference, uri, line, character, referenceCache);
+
+      currentReference++;
+    }
+
+    // All remaining references are out of range.
+    while (currentReference < sortedReferences.length) {
+      const reference = sortedReferences[currentReference++];
+
+      this.diagnoseTargetNotFound(
+        uri,
+        `Position ${reference.target.line + 1}:${
+          reference.target.character + 1
+        } out of range`,
+        reference,
+        referenceCache,
+      );
+    }
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  // MARK: Helpers
+
+  /**
+   * @param targetLine 0-indexed. If -1, no target position is added to the URI.
+   * @param targetColumn 0-indexed.
+   */
   private addLink(
     reference: Reference,
     target: vscode.Uri,
@@ -568,7 +779,7 @@ class LinkResolver {
   ): void {
     const link = new vscode.DocumentLink(
       reference.range,
-      at(target, targetLine + 1, targetColumn + 1),
+      targetLine === -1 ? target : at(target, targetLine + 1, targetColumn + 1),
     );
 
     this.links.push(link);
@@ -580,6 +791,55 @@ class LinkResolver {
     getOrCreate(referenceCache, this.uriString, () => new Set()).add(
       reference.text,
     );
+  }
+
+  private diagnoseTargetNotFound(
+    uri: vscode.Uri,
+    message: string,
+    reference: Reference,
+    referenceCache: Map<string, Set<string>>,
+    diagnosticRange = reference.range,
+  ): void {
+    if (reference.rule.targetNotFoundLink) {
+      this.addLink(reference, uri, -1, -1, referenceCache);
+    }
+
+    if (reference.rule.targetNotFound !== undefined) {
+      // Add the diagnostic _after_ the link, since both will modify the cache, and only _we_ handle
+      // the case where we need a diagnostic as well.
+      const diagnostic = new vscode.Diagnostic(
+        diagnosticRange,
+        message,
+        reference.rule.targetNotFound,
+      );
+
+      this.diagnostics.push(diagnostic);
+      this.cachedDocument.references.set(reference.text, {
+        diagnostic,
+        target: reference.rule.targetNotFoundLink ? uri : undefined,
+        keep: true,
+      });
+    }
+  }
+
+  private diagnoseFileNotFound(
+    uri: vscode.Uri,
+    error: Error,
+    references: readonly Reference[],
+  ): void {
+    const message = `Cannot read \`${uri.toString(true)}\`: ${error.message}.`;
+
+    for (const reference of references) {
+      if (reference.rule.fileNotFound !== undefined) {
+        this.diagnostics.push(
+          new vscode.Diagnostic(
+            reference.range,
+            message,
+            reference.rule.fileNotFound,
+          ),
+        );
+      }
+    }
   }
 }
 
@@ -631,7 +891,7 @@ function parseTextFragment(fragment: string): TextFragment | string {
   }
 
   if (parts.length > 2) {
-    return "Too many parts (separated by `-`) in text fragment.";
+    return "Too many parts (separated by `,`) in text fragment.";
   }
 
   const textStart = decodeURIComponent(parts[0]);
@@ -674,6 +934,24 @@ function cleanUpSymbolName(name: string): string {
   return name.replace(/^#+/, "").trim().replace(/\s+/g, "-");
 }
 
+/** Returns the loaded document at the given URI, if any. */
+function documentAt(uri: vscode.Uri): vscode.TextDocument | undefined {
+  return vscode.workspace.textDocuments.find((document) =>
+    uriEq(document.uri, uri)
+  );
+}
+
+/** Reads the file at the given URI, returning an error on error. */
+async function readFileText(uri: vscode.Uri): Promise<string | Error> {
+  try {
+    const documentBytes = await vscode.workspace.fs.readFile(uri);
+
+    return vscode.workspace.decode(documentBytes, { uri });
+  } catch (e) {
+    return e as Error;
+  }
+}
+
 /** Returns the value associated with `key`, creating it with `createValue()` and inserting it first if absent. */
 function getOrCreate<K, V>(map: Map<K, V>, key: K, createValue: () => V): V {
   const existing = map.get(key);
@@ -693,13 +971,20 @@ interface ReferencedDocument {
   readonly references: Reference[];
 }
 
-interface Reference {
+interface Reference<Target extends Reference.Target = Reference.Target> {
   /** Range in the _referencing document_ (*not* the referenced document) where the reference is. */
   readonly range: vscode.Range;
   /** Text of the reference; used for caching. */
   readonly text: string;
-  /** The target symbol path or text fragment. */
-  readonly target: string | TextFragment;
+  /** The target symbol path, text fragment, or position. */
+  readonly target: Target;
+  /** The rule which created this reference. */
+  readonly rule: Rule;
+}
+
+declare namespace Reference {
+  /** A target symbol path (`string`), text fragment, position, or nothing (file must simply exist). */
+  type Target = string | TextFragment | vscode.Position | undefined;
 }
 
 /** A referenced [text fragment](https://developer.mozilla.org/docs/Web/URI/Reference/Fragment/Text_fragments). */
@@ -716,7 +1001,9 @@ interface DocumentCache {
   readonly references: Map<
     string,
     {
-      readonly target: vscode.Uri | vscode.Diagnostic;
+      readonly target?: vscode.Uri;
+      readonly diagnostic?: vscode.Diagnostic;
+
       /** Set to false when loading the cache, and to true when the cache is used. */
       keep: boolean;
     }
@@ -726,7 +1013,7 @@ interface DocumentCache {
 /** A recursive tree of symbols. */
 interface SymbolTree {
   /** References to that symbol. */
-  readonly references: Reference[];
+  readonly references: Reference<string>[];
   /** Map from path segment (identifier) to tree for that symbol. */
   readonly children: Map<string, SymbolTree>;
 }
