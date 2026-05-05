@@ -109,19 +109,20 @@
   },
 
   "scripts": {
+    "check-types": "tsc --noEmit",
+    "check": "npm-run-all -p check-types lint",
+    "compile-tests": "tsc -p . --outDir out",
+    "compile": "pnpm run check && node esbuild.mjs",
+    "lint": "eslint src",
+    "package-vsix": "vsce package",
+    "prepackage": "pnpm run check && node esbuild.mjs --production",
+    "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
+    "test": "vscode-test",
     "vscode:prepublish": "pnpm run prepackage",
-    "compile": "pnpm run check-types && pnpm run lint && node esbuild.mjs",
-    "watch": "npm-run-all -p watch:*",
+    "watch-tests": "tsc -p . -w --outDir out",
     "watch:esbuild": "node esbuild.mjs --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-    "prepackage": "pnpm run check-types && pnpm run lint && node esbuild.mjs --production",
-    "package": "vsce package",
-    "compile-tests": "tsc -p . --outDir out",
-    "watch-tests": "tsc -p . -w --outDir out",
-    "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
-    "check-types": "tsc --noEmit",
-    "lint": "eslint src",
-    "test": "vscode-test"
+    "watch": "npm-run-all -p watch:*"
   },
   "devDependencies": {
     "@types/vscode": "^1.110.0",

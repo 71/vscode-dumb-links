@@ -657,7 +657,7 @@ class LinkResolver {
           stat.type !== vscode.FileType.File &&
           stat.type !== vscode.FileType.SymbolicLink
         ) {
-          throw new Error(`not a file`);
+          throw new Error("not a file");
         }
 
         for (const reference of references) {
